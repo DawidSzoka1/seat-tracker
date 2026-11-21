@@ -90,13 +90,13 @@ for (const s of SEATS) {
 }
 
 // ---------------------------------------------------------------------
-//  Backend: Firebase (na żywo) albo DEMO (localStorage)
+//  Backend: Firebase (na żywo) albo DEMO (w pamięci / localStorage)
 // ---------------------------------------------------------------------
 async function firebaseBackend() {
   const V = '10.12.2';
   const { initializeApp } = await import(`https://www.gstatic.com/firebasejs/${V}/firebase-app.js`);
-  const db_ = await import(`https://www.gstatic.com/firebasejs/${V}/firebase-database.js`);
-  const { getDatabase, ref, onValue, runTransaction, push, query, limitToLast, serverTimestamp } = db_;
+  const fb = await import(`https://www.gstatic.com/firebasejs/${V}/firebase-database.js`);
+  const { getDatabase, ref, onValue, update, get, push, query, limitToLast, serverTimestamp } = fb;
   const db = getDatabase(initializeApp(FIREBASE_CONFIG));
   const base = `events/${EVENT}`;
   return {
@@ -105,12 +105,21 @@ async function firebaseBackend() {
       const arr = []; snap.forEach((c) => { arr.push(c.val()); }); cb(arr.reverse());
     }),
     onConnection: (cb) => onValue(ref(db, '.info/connected'), (snap) => cb(snap.val() === true)),
-    async claim(id, by) {
-      const res = await runTransaction(ref(db, `${base}/seats/${id}`), (cur) => (cur === null ? { by, at: Date.now() } : undefined), { applyLocally: false });
-      return res.committed;
+    // Sprzedaż kilku miejsc jednym zapisem: reguły bazy odrzucą CAŁOŚĆ,
+    // jeśli choć jedno miejsce jest już zajęte (nikt nie dostanie połowy).
+    async claimMany(ids, by) {
+      const at = Date.now(); const upd = {};
+      ids.forEach((id) => { upd[id] = { by, at }; });
+      try { await update(ref(db, `${base}/seats`), upd); return { ok: true, taken: [] }; } catch (e) {
+        const snaps = await Promise.all(ids.map((id) => get(ref(db, `${base}/seats/${id}`))));
+        const taken = ids.filter((_, i) => snaps[i].exists());
+        if (!taken.length) throw e;
+        return { ok: false, taken };
+      }
     },
-    async release(id) {
-      await runTransaction(ref(db, `${base}/seats/${id}`), () => null, { applyLocally: false });
+    async releaseMany(ids) {
+      const upd = {}; ids.forEach((id) => { upd[id] = null; });
+      await update(ref(db, `${base}/seats`), upd);
     },
     log: (entry) => push(ref(db, `${base}/log`), { ...entry, at: serverTimestamp() }),
   };
@@ -118,40 +127,66 @@ async function firebaseBackend() {
 
 function demoBackend() {
   const K = `demo-seats:${EVENT}`, KL = `demo-log:${EVENT}`;
-  const read = (k, d) => JSON.parse(localStorage.getItem(k) || d);
+  const mem = {};
+  const read = (k, d) => { try { return JSON.parse(localStorage.getItem(k) || d); } catch { return JSON.parse(mem[k] || d); } };
+  const write = (k, v) => { mem[k] = JSON.stringify(v); try { localStorage.setItem(k, mem[k]); } catch { /* brak localStorage */ } };
   const subs = { seats: [], log: [] };
   const emit = () => { subs.seats.forEach((cb) => cb(read(K, '{}'))); subs.log.forEach((cb) => cb(read(KL, '[]'))); };
   addEventListener('storage', (e) => { if (e.key === K || e.key === KL) emit(); });
-  return {
+  const api = {
     onSeats: (cb) => { subs.seats.push(cb); cb(read(K, '{}')); },
     onLog: (cb) => { subs.log.push(cb); cb(read(KL, '[]')); },
     onConnection: (cb) => cb(true),
-    async claim(id, by) {
-      const s = read(K, '{}'); if (s[id]) return false;
-      s[id] = { by, at: Date.now() }; localStorage.setItem(K, JSON.stringify(s)); emit(); return true;
+    async claimMany(ids, by) {
+      const s = read(K, '{}'); const taken = ids.filter((id) => s[id]);
+      if (taken.length) return { ok: false, taken };
+      ids.forEach((id) => { s[id] = { by, at: Date.now() }; }); write(K, s); emit(); return { ok: true, taken: [] };
     },
-    async release(id) { const s = read(K, '{}'); delete s[id]; localStorage.setItem(K, JSON.stringify(s)); emit(); },
-    log(entry) { const l = read(KL, '[]'); l.unshift({ ...entry, at: Date.now() }); localStorage.setItem(KL, JSON.stringify(l.slice(0, 40))); emit(); },
+    async releaseMany(ids) { const s = read(K, '{}'); ids.forEach((id) => delete s[id]); write(K, s); emit(); },
+    log(entry) { const l = read(KL, '[]'); l.unshift({ ...entry, at: Date.now() }); write(KL, l.slice(0, 40)); emit(); },
+    _read: () => read(K, '{}'), _write: (s) => { write(K, s); emit(); },
   };
+  return api;
 }
 
 // ---------------------------------------------------------------------
 //  Stan i interfejs
 // ---------------------------------------------------------------------
+const store = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
+};
 let sold = {};
-let me = localStorage.getItem('seller-name') || '';
+let me = store.get('seller-name') || (window.SEAT_DEMO_SIM ? 'Kasa 1' : '');
 let backend;
 let firstLoad = true;
+const selected = new Set();
 const recentlyMine = new Set();
 
 const fmtTime = (t) => (t ? new Date(t).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : '');
 const fmtDate = (t) => (t ? new Date(t).toLocaleString('pl-PL') : '');
-const short = (s) => `${s.sec === 'P' ? 'Parter' : SECTIONS.find((x) => x.id === s.sec).name}${s.row != null ? ` rz. ${s.row}` : ''} m. ${s.n}`;
+const secName = (s) => SECTIONS.find((x) => x.id === s.sec).name;
+const short = (s) => `${secName(s)}${s.row != null ? ` rz. ${s.row}` : ''} m. ${s.n}`;
 const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const markMine = (ids) => ids.forEach((id) => { recentlyMine.add(id); setTimeout(() => recentlyMine.delete(id), 3000); });
 
-function toast(html, actionLabel, action, ms = 6000) {
+// Grupuje miejsca: "Parter rz. 5: m. 12, 13, 14"
+function groupSeats(ids) {
+  const groups = new Map();
+  for (const id of ids) {
+    const s = SEAT_BY_ID.get(id);
+    const key = `${secName(s)}${s.row != null ? ` rz. ${s.row}` : ''}`;
+    if (!groups.has(key)) groups.set(key, { key, zone: s.zone, nums: [] });
+    groups.get(key).nums.push(s.n);
+  }
+  return [...groups.values()].map((g) => ({ ...g, nums: g.nums.sort((a, b) => a - b) }));
+}
+const groupsHtml = (ids) => groupSeats(ids).map((g) =>
+  `<div class="grp"><i style="background:${ZONES[g.zone].color}"></i><span>${esc(g.key)}</span><b>m. ${g.nums.join(', ')}</b></div>`).join('');
+
+function toast(html, actionLabel, action, ms = 6000, cls = '') {
   const t = document.createElement('div');
-  t.className = 'toast'; t.innerHTML = `<span>${html}</span>`;
+  t.className = `toast ${cls}`; t.innerHTML = `<span>${html}</span>`;
   if (actionLabel) {
     const b = document.createElement('button'); b.textContent = actionLabel;
     b.onclick = () => { action(); t.remove(); }; t.appendChild(b);
@@ -160,13 +195,30 @@ function toast(html, actionLabel, action, ms = 6000) {
   setTimeout(() => t.remove(), ms);
 }
 
+// Okno dialogowe (zamiast confirm(), które bywa blokowane)
+function modal({ title, body, ok, okClass = '', cancel = 'Wróć' }) {
+  return new Promise((resolve) => {
+    const d = $('#modal');
+    d.innerHTML = `<h2>${title}</h2><div class="mbody">${body}</div><div class="mbtns">
+      ${cancel ? `<button class="b-sec" data-r="0">${cancel}</button>` : ''}
+      ${ok ? `<button class="b-pri ${okClass}" data-r="1">${ok}</button>` : ''}</div>`;
+    d.onclick = (e) => { const b = e.target.closest('button[data-r]'); if (b) { d.close(); resolve(b.dataset.r === '1'); } };
+    d.oncancel = () => resolve(false);
+    d.showModal();
+    d.querySelector('.b-pri')?.focus();
+  });
+}
+
 function render(newSold) {
   const prev = sold; sold = newSold;
+  const lost = [];
   for (const s of SEATS) {
     const { g, title } = seatEls.get(s.id);
     const info = sold[s.id];
+    if (info && selected.has(s.id)) { selected.delete(s.id); if (!recentlyMine.has(s.id)) lost.push(s.id); }
     g.classList.toggle('sold', !!info);
     g.classList.toggle('mine', !!info && info.by === me);
+    g.classList.toggle('sel', selected.has(s.id));
     title.textContent = info ? `${s.label}\nSPRZEDANE – ${info.by}, ${fmtDate(info.at)}` : `${s.label}\nWOLNE – ${ZONES[s.zone].name}`;
     const changed = !!prev[s.id] !== !!info;
     if (!firstLoad && changed && !recentlyMine.has(s.id)) {
@@ -174,7 +226,10 @@ function render(newSold) {
     }
   }
   firstLoad = false;
-  renderStats();
+  if (lost.length) {
+    toast(`⚠ Ktoś inny właśnie sprzedał ${lost.length > 1 ? 'miejsca' : 'miejsce'} z Twojego zaznaczenia: <b>${lost.map((id) => esc(short(SEAT_BY_ID.get(id)))).join(', ')}</b> – usunięto z zaznaczenia.`, null, null, 7000, 'warn');
+  }
+  renderStats(); renderSelection();
 }
 
 function renderStats() {
@@ -191,61 +246,102 @@ function renderStats() {
     .map(([n, c]) => `<div class="zrow"><span>${esc(n)}${n === me ? ' (Ty)' : ''}</span><b>${c}</b></div>`).join('') || '<small>Jeszcze nic nie sprzedano</small>';
 }
 
+function renderSelection() {
+  const bar = $('#selbar');
+  bar.classList.toggle('show', selected.size > 0);
+  if (!selected.size) return;
+  const byZone = {};
+  for (const id of selected) { const z = SEAT_BY_ID.get(id).zone; byZone[z] = (byZone[z] || 0) + 1; }
+  $('#sel-count').textContent = `Zaznaczono: ${selected.size}`;
+  $('#sel-zones').innerHTML = Object.entries(byZone).map(([z, c]) => `<span><i style="background:${ZONES[z].color}"></i>${ZONES[z].name}: ${c}</span>`).join('');
+  $('#sel-list').innerHTML = groupSeats([...selected]).map((g) => `${esc(g.key)}: ${g.nums.join(', ')}`).join(' · ');
+  $('#sel-sell').textContent = `Sprzedaj (${selected.size})`;
+}
+
 function renderLog(list) {
   $('#log').innerHTML = list.map((e) => {
-    const s = SEAT_BY_ID.get(e.seat);
+    const ids = String(e.seat).split(',');
     const what = e.a === 'sold' ? '<em class="s">sprzedał(a)</em>' : '<em class="f">zwolnił(a)</em>';
-    return `<li><time>${fmtTime(e.at)}</time> <b>${esc(e.by)}</b> ${what} ${s ? esc(short(s)) : esc(e.seat)}</li>`;
+    const seats = ids.every((id) => SEAT_BY_ID.has(id)) ? groupSeats(ids).map((g) => `${g.key} m. ${g.nums.join(', ')}`).join('; ') : e.seat;
+    return `<li><time>${fmtTime(e.at)}</time> <b>${esc(e.by)}</b> ${what} ${esc(seats)}</li>`;
   }).join('') || '<li><small>Brak zmian</small></li>';
 }
 
-async function onSeatClick(id) {
+function onSeatClick(id) {
   if (!me) { askName(); return; }
-  const s = SEAT_BY_ID.get(id); const info = sold[id];
-  recentlyMine.add(id); setTimeout(() => recentlyMine.delete(id), 3000);
-  if (!info) {
-    seatEls.get(id).g.classList.add('pending');
-    let ok = false;
-    try { ok = await backend.claim(id, me); } catch (e) { console.error(e); }
-    seatEls.get(id).g.classList.remove('pending');
-    if (ok) {
-      backend.log({ a: 'sold', seat: id, by: me });
-      toast(`✔ Sprzedano: <b>${esc(short(s))}</b> (${ZONES[s.zone].name})`, 'Cofnij', () => release(id, true));
-    } else {
-      toast(`✖ <b>${esc(short(s))}</b> zostało właśnie sprzedane przez kogoś innego!`, null, null, 5000);
-    }
+  if (sold[id]) { showSoldSeat(id); return; }
+  if (selected.has(id)) selected.delete(id); else selected.add(id);
+  seatEls.get(id).g.classList.toggle('sel', selected.has(id));
+  renderSelection();
+}
+
+async function sellSelected() {
+  const ids = [...selected];
+  if (!ids.length) return;
+  const ok = await modal({
+    title: `Potwierdź sprzedaż ${ids.length} ${ids.length === 1 ? 'miejsca' : 'miejsc'}`,
+    body: `${groupsHtml(ids)}<p class="muted">Sprzedający: <b>${esc(me)}</b></p>`,
+    ok: '✔ Potwierdzam sprzedaż', cancel: 'Wróć',
+  });
+  if (!ok) return;
+  ids.forEach((id) => seatEls.get(id).g.classList.add('pending'));
+  markMine(ids);
+  let res;
+  try { res = await backend.claimMany(ids, me); } catch (e) { console.error(e); res = null; }
+  ids.forEach((id) => seatEls.get(id).g.classList.remove('pending'));
+  if (!res) { toast('✖ Błąd zapisu – sprawdź połączenie i spróbuj ponownie.', null, null, 6000, 'warn'); return; }
+  if (res.ok) {
+    ids.forEach((id) => selected.delete(id)); render(sold);
+    backend.log({ a: 'sold', seat: ids.join(','), by: me });
+    toast(`✔ Sprzedano ${ids.length} ${ids.length === 1 ? 'miejsce' : 'miejsc'}`, 'Cofnij', () => releaseIds(ids, true), 8000, 'ok');
   } else {
-    const who = info.by === me ? 'Ty' : info.by;
-    if (confirm(`${s.label}\n\nSprzedane przez: ${who}, ${fmtDate(info.at)}\n\nZwolnić to miejsce (np. zwrot biletu)?`)) release(id);
+    res.taken.forEach((id) => selected.delete(id)); render(sold);
+    await modal({
+      title: '✖ Nie sprzedano – część miejsc jest już zajęta',
+      body: `<p>W międzyczasie ktoś inny sprzedał:</p>${groupsHtml(res.taken)}<p>Usunąłem je z zaznaczenia. <b>Pozostałe miejsca nie zostały sprzedane</b> – sprawdź zaznaczenie i potwierdź ponownie.</p>`,
+      ok: 'Rozumiem', cancel: null, okClass: 'b-warn',
+    });
   }
 }
 
-async function release(id, undo = false) {
-  recentlyMine.add(id); setTimeout(() => recentlyMine.delete(id), 3000);
-  try {
-    await backend.release(id);
-    backend.log({ a: 'freed', seat: id, by: me });
-    if (!undo) toast(`Zwolniono: <b>${esc(short(SEAT_BY_ID.get(id)))}</b>`);
-  } catch (e) { console.error(e); toast('Błąd zapisu – sprawdź połączenie'); }
+async function showSoldSeat(id) {
+  const s = SEAT_BY_ID.get(id), info = sold[id];
+  const ok = await modal({
+    title: 'Miejsce sprzedane',
+    body: `${groupsHtml([id])}<p>Sprzedał(a): <b>${esc(info.by === me ? `${info.by} (Ty)` : info.by)}</b><br>Kiedy: ${fmtDate(info.at)}</p><p class="muted">Zwolnij tylko przy zwrocie biletu.</p>`,
+    ok: 'Zwolnij miejsce (zwrot)', okClass: 'b-danger', cancel: 'Zamknij',
+  });
+  if (ok) releaseIds([id]);
+  void s;
 }
 
-function askName() {
-  const d = $('#name-dialog'); $('#name-input').value = me; d.showModal();
+async function releaseIds(ids, undo = false) {
+  markMine(ids);
+  try {
+    await backend.releaseMany(ids);
+    backend.log({ a: 'freed', seat: ids.join(','), by: me });
+    toast(undo ? 'Cofnięto sprzedaż' : `Zwolniono: <b>${esc(short(SEAT_BY_ID.get(ids[0])))}</b>`);
+  } catch (e) { console.error(e); toast('✖ Błąd zapisu – sprawdź połączenie', null, null, 6000, 'warn'); }
 }
+
+function askName() { $('#name-input').value = me; $('#name-dialog').showModal(); }
 $('#name-form').addEventListener('submit', (e) => {
   const v = $('#name-input').value.trim().slice(0, 40);
   if (!v) { e.preventDefault(); return; }
-  me = v; localStorage.setItem('seller-name', me); $('#me').textContent = me; render(sold);
+  me = v; store.set('seller-name', me); $('#me').textContent = me; render(sold);
 });
 $('#change-name').onclick = askName;
+$('#sel-clear').onclick = () => { selected.clear(); render(sold); };
+$('#sel-sell').onclick = sellSelected;
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && selected.size && !document.querySelector('dialog[open]')) { selected.clear(); render(sold); } });
 
 svg.addEventListener('click', (e) => {
   const g = e.target.closest('.seat'); if (g) onSeatClick(g.dataset.id);
 });
 
 // zoom
-let zoom = +(localStorage.getItem('zoom') || (innerWidth < 800 ? 1.6 : 1));
-const applyZoom = () => { svg.style.width = `${zoom * 100}%`; localStorage.setItem('zoom', zoom); };
+let zoom = +(store.get('zoom') || (innerWidth < 800 ? 1.6 : 1));
+const applyZoom = () => { svg.style.width = `${zoom * 100}%`; store.set('zoom', zoom); };
 $('#zin').onclick = () => { zoom = Math.min(4, zoom * 1.25); applyZoom(); };
 $('#zout').onclick = () => { zoom = Math.max(0.6, zoom / 1.25); applyZoom(); };
 applyZoom();
@@ -255,7 +351,7 @@ $('#csv').onclick = () => {
   const rows = [['Sekcja', 'Rząd', 'Miejsce', 'Strefa', 'Status', 'Sprzedawca', 'Czas']];
   for (const s of SEATS) {
     const i = sold[s.id];
-    rows.push([SECTIONS.find((x) => x.id === s.sec).name, s.row ?? '', s.n, ZONES[s.zone].name, i ? 'sprzedane' : 'wolne', i ? i.by : '', i ? fmtDate(i.at) : '']);
+    rows.push([secName(s), s.row ?? '', s.n, ZONES[s.zone].name, i ? 'sprzedane' : 'wolne', i ? i.by : '', i ? fmtDate(i.at) : '']);
   }
   const csv = '﻿' + rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(';')).join('\n');
   const a = document.createElement('a');
@@ -264,19 +360,50 @@ $('#csv').onclick = () => {
 };
 
 $('#legend').innerHTML = Object.values(ZONES).map((z) => `<span><i style="background:${z.color}"></i>${z.name}</span>`).join('')
-  + '<span><i class="lg-sold"></i>Sprzedane</span><span><i class="lg-mine"></i>Sprzedane przez Ciebie</span>';
+  + '<span><i class="lg-sel"></i>Zaznaczone (do sprzedaży)</span><span><i class="lg-sold"></i>Sprzedane</span><span><i class="lg-mine"></i>Sprzedane przez Ciebie</span>';
+
+// ---------------------------------------------------------------------
+//  Symulacja innego sprzedawcy (tylko podgląd demo)
+// ---------------------------------------------------------------------
+function startDemoSimulation(api) {
+  const others = ['Kasa 2 – Ewa', 'Punkt Rynek – Marek', 'Kasa 3 – Ola'];
+  const pick = (a) => a[Math.floor(Math.random() * a.length)];
+  const s = {}; const now = Date.now();
+  // ok. 30% sali już sprzedane, w blokach obok siebie
+  for (let i = 0; i < 70; i++) {
+    const start = Math.floor(Math.random() * SEATS.length); const len = 1 + Math.floor(Math.random() * 4); const by = pick(others);
+    for (let j = 0; j < len; j++) { const st = SEATS[start + j]; if (st && st.sec === SEATS[start].sec && st.row === SEATS[start].row) s[st.id] = { by, at: now - Math.random() * 36e5 }; }
+  }
+  api._write(s);
+  setInterval(() => {
+    const cur = api._read();
+    const free = SEATS.filter((x) => !cur[x.id]);
+    if (!free.length) return;
+    const first = pick(free); const by = pick(others);
+    const ids = SEATS.filter((x) => x.sec === first.sec && x.row === first.row && x.n >= first.n && x.n < first.n + 1 + Math.floor(Math.random() * 3) && !cur[x.id]).map((x) => x.id);
+    ids.forEach((id) => { cur[id] = { by, at: Date.now() }; });
+    api._write(cur);
+    api.log({ a: 'sold', seat: ids.join(','), by });
+  }, 9000);
+}
 
 // ---------------------------------------------------------------------
 //  Start
 // ---------------------------------------------------------------------
 (async function start() {
   $('#event').textContent = EVENT || '(demo)';
-  if (DEMO) $('#banner').innerHTML = '⚠ TRYB DEMO – dane tylko w tej przeglądarce. Uzupełnij <code>config.js</code>, aby sprzedawać na żywo.';
+  if (window.SEAT_DEMO_SIM) {
+    $('#banner').innerHTML = '👀 <b>PODGLĄD</b> – kliknij kilka kolorowych miejsc, potem „Sprzedaj”. Co ~9 s „inne kasy” sprzedają miejsca (mignięcie na żółto), żeby pokazać działanie na żywo.';
+    $('#csv').style.display = 'none';
+  } else if (DEMO) {
+    $('#banner').innerHTML = '⚠ TRYB DEMO – dane tylko w tej przeglądarce. Uzupełnij <code>config.js</code>, aby sprzedawać na żywo.';
+  }
   if (!DEMO && EVENT.length < 8) {
     $('#banner').innerHTML = '⚠ Brak lub zbyt krótki klucz wydarzenia w linku. Użyj linku w formie <code>?e=nazwa-losowe8znakow</code> (min. 8 znaków).';
     $('#banner').classList.add('err'); return;
   }
   backend = DEMO ? demoBackend() : await firebaseBackend();
+  if (window.SEAT_DEMO_SIM) startDemoSimulation(backend);
   backend.onSeats(render);
   backend.onLog(renderLog);
   backend.onConnection((ok) => {
