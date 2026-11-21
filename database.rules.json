@@ -1,0 +1,23 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "events": {
+      "$event": {
+        ".read": "$event.length >= 8",
+        "seats": {
+          "$seat": {
+            ".write": "$event.length >= 8 && $seat.matches(/^[A-Za-z0-9_]{1,20}$/) && (!data.exists() || !newData.exists())",
+            ".validate": "newData.hasChildren(['by', 'at']) && newData.child('by').isString() && newData.child('by').val().length <= 40 && newData.child('at').isNumber()"
+          }
+        },
+        "log": {
+          "$id": {
+            ".write": "$event.length >= 8 && !data.exists()",
+            ".validate": "newData.hasChildren(['a', 'seat', 'by', 'at']) && newData.child('by').val().length <= 40"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Sprzedaż miejsc – Duża Scena</title>
+<style>
+  :root { --bg:#f6f5f2; --panel:#fff; --ink:#222; --muted:#777; --line:#e3e1dc; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color:var(--ink); background:var(--bg); }
+  header { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; padding:10px 16px; background:#1d1d1f; color:#fff; }
+  header h1 { font-size:16px; margin:0; }
+  header .ev { color:#bbb; }
+  header .who { margin-left:auto; }
+  header button { background:#333; color:#fff; border:1px solid #555; border-radius:6px; padding:4px 10px; cursor:pointer; }
+  #conn { color:#5fd17a; font-weight:600; }
+  body.offline #conn { color:#ff6b6b; }
+  body.offline #map-wrap { opacity:.45; pointer-events:none; }
+  #banner:empty { display:none; }
+  #banner { background:#fff3cd; border-bottom:1px solid #e8d48a; padding:8px 16px; }
+  #banner.err { background:#ffd9d9; border-color:#e99; }
+  main { display:flex; gap:12px; padding:12px; align-items:flex-start; }
+  #map-wrap { flex:1; min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:auto; max-height:calc(100vh - 90px); position:relative; }
+  #map { display:block; width:100%; height:auto; }
+  .zoom { position:sticky; top:8px; left:8px; z-index:2; display:inline-flex; gap:4px; margin:8px; }
+  .zoom button { width:34px; height:34px; font-size:20px; border-radius:8px; border:1px solid #ccc; background:#fff; cursor:pointer; }
+  aside { width:300px; flex-shrink:0; display:flex; flex-direction:column; gap:12px; max-height:calc(100vh - 90px); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .card h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  #free-big { font-size:40px; font-weight:800; line-height:1; }
+  #free-sub { color:var(--muted); }
+  .zrow { display:flex; align-items:center; gap:8px; padding:3px 0; }
+  .zrow span { flex:1; } .zrow b { font-size:16px; } .zrow small { color:var(--muted); width:42px; }
+  .zrow i, #legend i { width:14px; height:14px; border-radius:3px; display:inline-block; }
+  #log-card { flex:1; min-height:120px; overflow:auto; }
+  #log { list-style:none; margin:0; padding:0; font-size:13px; }
+  #log li { padding:4px 0; border-bottom:1px solid #f0eee9; }
+  #log time { color:var(--muted); font-variant-numeric:tabular-nums; }
+  #log em { font-style:normal; font-weight:600; } #log em.s { color:#b23; } #log em.f { color:#178a3f; }
+  #legend { display:flex; flex-wrap:wrap; gap:6px 14px; padding:8px 12px; font-size:12px; }
+  #legend span { display:inline-flex; gap:5px; align-items:center; }
+  .lg-sold { background:#c9c9c9; } .lg-mine { background:#c9c9c9; outline:2px solid #1d6fe0; }
+  .btn { width:100%; padding:8px; border-radius:8px; border:1px solid #ccc; background:#fff; cursor:pointer; font-weight:600; }
+
+  /* SVG */
+  .stage { fill:#fff; stroke:#bbb; stroke-width:1.5; }
+  .stage-t { text-anchor:middle; font-weight:800; font-size:22px; fill:#aaa; }
+  .console { fill:#f2f2f2; stroke:#ccc; }
+  .console-t { text-anchor:middle; font-size:7px; font-weight:700; fill:#999; }
+  .sec-label { text-anchor:middle; font-weight:800; fill:#222; }
+  .row-label { text-anchor:middle; font-size:7px; font-weight:700; fill:#333; }
+  .seat { cursor:pointer; }
+  .seat rect { stroke:rgba(0,0,0,.15); stroke-width:.6; transition:fill .2s; }
+  .seat text { text-anchor:middle; font-size:6.8px; font-weight:700; fill:#fff; pointer-events:none; }
+  .seat:hover rect { stroke:#000; stroke-width:1.5; }
+  .seat.sold rect { fill:#cfcfcf !important; stroke:#aaa; }
+  .seat.sold text { fill:#8a8a8a; text-decoration:line-through; }
+  .seat.mine rect { stroke:#1d6fe0; stroke-width:1.6; }
+  .seat.pending rect { fill:#999 !important; }
+  .seat.flash rect { animation:flash 2.2s ease-out; }
+  @keyframes flash { 0%,40% { stroke:#ff0; stroke-width:5; } 100% { stroke-width:.6; } }
+
+  #toasts { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); display:flex; flex-direction:column; gap:8px; z-index:10; }
+  .toast { background:#222; color:#fff; padding:10px 14px; border-radius:8px; box-shadow:0 4px 18px rgba(0,0,0,.3); display:flex; gap:14px; align-items:center; }
+  .toast button { background:#fff; color:#222; border:0; border-radius:6px; padding:4px 10px; font-weight:700; cursor:pointer; }
+  dialog { border:0; border-radius:12px; padding:20px; box-shadow:0 10px 40px rgba(0,0,0,.3); }
+  dialog input { font-size:16px; padding:8px; width:260px; display:block; margin:10px 0; }
+  dialog button { padding:8px 16px; font-weight:700; }
+
+  @media (max-width: 900px) {
+    main { flex-direction:column; }
+    aside { width:100%; max-height:none; }
+    #map-wrap { width:100%; max-height:75vh; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Duża Scena – sprzedaż miejsc</h1>
+  <span class="ev">wydarzenie: <b id="event"></b></span>
+  <span id="conn">● Łączenie…</span>
+  <span class="who">Sprzedający: <b id="me"></b> <button id="change-name">zmień</button></span>
+</header>
+<div id="banner"></div>
+<main>
+  <div id="map-wrap">
+    <div class="zoom"><button id="zout" title="Pomniejsz">−</button><button id="zin" title="Powiększ">+</button></div>
+    <svg id="map" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="legend"></div>
+  </div>
+  <aside>
+    <div class="card">
+      <h3>Wolne miejsca</h3>
+      <div id="free-big">–</div>
+      <div id="free-sub"></div>
+      <div id="zones" style="margin-top:10px"></div>
+    </div>
+    <div class="card"><h3>Sprzedane przez</h3><div id="sellers"></div></div>
+    <div class="card" id="log-card"><h3>Ostatnie zmiany (na żywo)</h3><ul id="log"></ul></div>
+    <button class="btn" id="csv">⬇ Pobierz listę miejsc (CSV / Excel)</button>
+  </aside>
+</main>
+<div id="toasts"></div>
+<dialog id="name-dialog">
+  <form method="dialog" id="name-form">
+    <b>Kto sprzedaje?</b><br><small>Imię lub punkt sprzedaży, np. „Kasa – Anna”</small>
+    <input id="name-input" maxlength="40" required autofocus>
+    <button>OK</button>
+  </form>
+</dialog>
+<script type="module" src="app.js"></script>
+</body>
+</html>
