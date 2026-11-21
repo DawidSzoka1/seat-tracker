@@ -387,21 +387,67 @@ function startDemoSimulation(api) {
   }, 9000);
 }
 
+
+// ---------------------------------------------------------------------
+//  Wybór / tworzenie wydarzenia (gdy w linku brak ?e=...)
+// ---------------------------------------------------------------------
+function slugify(t) {
+  return t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ł/g, 'l')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30);
+}
+function randomSuffix(n = 6) {
+  const a = 'abcdefghjkmnpqrstuvwxyz23456789'; const r = crypto.getRandomValues(new Uint8Array(n));
+  return [...r].map((x) => a[x % a.length]).join('');
+}
+function goToEvent(key) { location.href = `${location.pathname}?e=${encodeURIComponent(key)}`; }
+function showEventPicker() {
+  document.body.classList.add('noevent'); $('#conn').textContent = '';
+  const d = $('#modal');
+  d.innerHTML = `<h2>Wybierz wydarzenie</h2>
+    <form id="ev-new"><b>Nowe wydarzenie</b> <span class="muted">(pusta sala)</span>
+      <input id="ev-name" placeholder="np. Gala 31.12" maxlength="30" required>
+      <button class="b-pri">Utwórz i otwórz</button></form>
+    <hr>
+    <form id="ev-open"><b>Mam już link / klucz</b>
+      <input id="ev-key" placeholder="wklej link albo klucz, np. gala-31-12-q7w3z9" required>
+      <button class="b-sec">Otwórz</button></form>
+    <p class="muted">Klucz wydarzenia jest częścią linku – kto go zna, ten może sprzedawać. Wysyłaj go tylko osobom sprzedającym.</p>`;
+  d.oncancel = (e) => e.preventDefault();
+  d.onclick = null;
+  $('#ev-new').onsubmit = (e) => {
+    e.preventDefault(); const base = slugify($('#ev-name').value) || 'wydarzenie';
+    goToEvent(`${base}-${randomSuffix()}`);
+  };
+  $('#ev-open').onsubmit = (e) => {
+    e.preventDefault(); let v = $('#ev-key').value.trim();
+    try { v = new URL(v).searchParams.get('e') || v; } catch { /* to nie link, tylko klucz */ }
+    v = v.replace(/[^A-Za-z0-9_-]/g, '');
+    if (v.length < 8) { $('#ev-key').setCustomValidity('Klucz musi mieć min. 8 znaków'); $('#ev-key').reportValidity(); $('#ev-key').setCustomValidity(''); return; }
+    goToEvent(v);
+  };
+  d.showModal();
+}
+
+$('#copy-link').onclick = async () => {
+  const link = `${location.origin}${location.pathname}?e=${EVENT}`;
+  try { await navigator.clipboard.writeText(link); toast('🔗 Skopiowano link dla sprzedających', null, null, 3000, 'ok'); } catch {
+    await modal({ title: 'Link dla sprzedających', body: `<input readonly value="${esc(link)}" style="width:100%;font-size:14px;padding:8px" onclick="this.select()">`, ok: 'OK', cancel: null });
+  }
+};
+
 // ---------------------------------------------------------------------
 //  Start
 // ---------------------------------------------------------------------
 (async function start() {
-  $('#event').textContent = EVENT || '(demo)';
+  $('#event').textContent = EVENT || (DEMO ? '(demo)' : '—');
   if (window.SEAT_DEMO_SIM) {
     $('#banner').innerHTML = '👀 <b>PODGLĄD</b> – kliknij kilka kolorowych miejsc, potem „Sprzedaj”. Co ~9 s „inne kasy” sprzedają miejsca (mignięcie na żółto), żeby pokazać działanie na żywo.';
     $('#csv').style.display = 'none';
   } else if (DEMO) {
     $('#banner').innerHTML = '⚠ TRYB DEMO – dane tylko w tej przeglądarce. Uzupełnij <code>config.js</code>, aby sprzedawać na żywo.';
   }
-  if (!DEMO && EVENT.length < 8) {
-    $('#banner').innerHTML = '⚠ Brak lub zbyt krótki klucz wydarzenia w linku. Użyj linku w formie <code>?e=nazwa-losowe8znakow</code> (min. 8 znaków).';
-    $('#banner').classList.add('err'); return;
-  }
+  if (!DEMO && EVENT.length < 8) { showEventPicker(); return; }
+  $('#copy-link').hidden = false;
   backend = DEMO ? demoBackend() : await firebaseBackend();
   if (window.SEAT_DEMO_SIM) startDemoSimulation(backend);
   backend.onSeats(render);
