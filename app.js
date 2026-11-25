@@ -1,4 +1,4 @@
-import { ZONES, SECTIONS, LABELS, VIEWBOX, STAGE, CONSOLE } from './layout.js';
+import { ZONES, SECTIONS, SEAT_DATA, ROW_SECTIONS, LABELS, VIEWBOX, STAGE, CONSOLE } from './layout.js';
 import { FIREBASE_CONFIG } from './config.js';
 
 const $ = (s) => document.querySelector(s);
@@ -8,52 +8,39 @@ const EVENT = (params.get('e') || '').replace(/[^A-Za-z0-9_-]/g, '');
 const DEMO = !FIREBASE_CONFIG;
 
 // ---------------------------------------------------------------------
-//  Budowa listy miejsc z układu
+//  Lista miejsc (z seats.js)
 // ---------------------------------------------------------------------
-function parseSeats(spec) {
-  const out = [];
-  for (const part of spec.split(',')) {
-    const p = part.trim();
-    if (p.startsWith('_')) { for (let i = 0; i < +p.slice(1); i++) out.push(null); continue; }
-    const [a, b] = p.split('-').map(Number);
-    for (let n = a; n <= (b || a); n++) out.push(n);
-  }
-  return out;
-}
-
+const SEC_NAME = Object.fromEntries(SECTIONS.map((s) => [s.id, s.name]));
 const SEATS = [];            // {id, n, row, sec, zone, x, y, rot, label}
 const SEAT_BY_ID = new Map();
-const ROW_LABELS = [];       // {x, y, text}
-
-function addSeat(sec, row, n, zone, x, y, rot) {
-  const id = `${sec.id}_${row ?? 0}_${n}`;
-  const label = `${sec.name}${row != null ? `, rząd ${row}` : ''}, miejsce ${n}`;
-  const s = { id, n, row, sec: sec.id, zone, x, y, rot, label };
+for (const d of SEAT_DATA) {
+  const id = `${d.sec}_${d.row ?? 0}_${d.n}`;
+  const label = `${SEC_NAME[d.sec]}${d.row != null ? `, rząd ${d.row}` : ''}, miejsce ${d.n}`;
+  const s = { ...d, id, label };
   SEATS.push(s); SEAT_BY_ID.set(id, s);
 }
 
-for (const sec of SECTIONS) {
-  if (sec.type === 'arc') {
-    for (const r of sec.rows) {
-      const list = parseSeats(r.seats);
-      const k = r.k ?? sec.k;
-      const mid = (list.length - 1) / 2;
-      const pos = (i) => { const dx = (i - mid) * sec.pitch; return [sec.cx + dx, r.y - k * dx * dx, Math.atan(-2 * k * dx) * 180 / Math.PI]; };
-      list.forEach((n, i) => { if (n != null) { const [x, y, rot] = pos(i); addSeat(sec, r.row, n, r.zone, x, y, rot); } });
-      if (sec.rowLabels) {
-        const [x1, y1] = pos(-1.1), [x2, y2] = pos(list.length - 1 + 1.1);
-        ROW_LABELS.push({ x: x1, y: y1, text: r.row }, { x: x2, y: y2, text: r.row });
-      }
-    }
-  } else {
-    const a = sec.rot * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
-    for (const r of sec.rows) {
-      const pitch = r.pitch ?? sec.pitch;
-      parseSeats(r.seats).forEach((n, i) => {
-        if (n == null) return;
-        const lx = (r.x || 0) + i * pitch, ly = r.y || 0;
-        addSeat(sec, r.row, n, r.zone, sec.x + lx * c - ly * s, sec.y + lx * s + ly * c, sec.rot);
-      });
+// Numery rzędów przy skrajnych miejscach każdego rzędu
+const ROW_LABELS = [];
+{
+  const rows = new Map();
+  for (const s of SEATS) {
+    if (!ROW_SECTIONS.includes(s.sec)) continue;
+    const k = `${s.sec}_${s.row}`;
+    if (!rows.has(k)) rows.set(k, []);
+    rows.get(k).push(s);
+  }
+  const segments = [];
+  for (const list of rows.values()) {
+    list.sort((a, b) => a.x - b.x);
+    segments.push(list);
+    // rzędy 18–19 parteru: numer także przy środkowej części (jak na planie)
+    if (list[0].sec === 'P' && (list[0].row === 18 || list[0].row === 19)) segments.push(list.filter((s) => s.x > 380 && s.x < 620));
+  }
+  for (const list of segments) {
+    for (const [s, dir] of [[list[0], -1], [list[list.length - 1], 1]]) {
+      const a = s.rot * Math.PI / 180;
+      ROW_LABELS.push({ x: s.x + dir * 11 * Math.cos(a), y: s.y + dir * 11 * Math.sin(a), text: s.row });
     }
   }
 }
@@ -62,7 +49,7 @@ for (const sec of SECTIONS) {
 //  Rysowanie SVG
 // ---------------------------------------------------------------------
 const svg = $('#map');
-svg.setAttribute('viewBox', `0 130 ${VIEWBOX.w} ${VIEWBOX.h - 130}`);
+svg.setAttribute('viewBox', `${VIEWBOX.x} ${VIEWBOX.y} ${VIEWBOX.w} ${VIEWBOX.h}`);
 const el = (tag, attrs = {}, parent = svg) => {
   const e = document.createElementNS(SVGNS, tag);
   for (const k in attrs) e.setAttribute(k, attrs[k]);
@@ -78,13 +65,13 @@ for (const [text, x, y, size] of LABELS) {
   const t = el('text', { x, y, class: 'sec-label', 'font-size': size });
   text.split('\n').forEach((line, i) => { const ts = el('tspan', { x, dy: i ? size * 1.15 : 0 }, t); ts.textContent = line; });
 }
-for (const r of ROW_LABELS) el('text', { x: r.x, y: r.y + 3, class: 'row-label' }).textContent = r.text;
+for (const r of ROW_LABELS) el('text', { x: r.x.toFixed(1), y: (r.y + 2.2).toFixed(1), class: 'row-label' }).textContent = r.text;
 
 const seatEls = new Map();
 for (const s of SEATS) {
-  const g = el('g', { class: 'seat', 'data-id': s.id, transform: `translate(${s.x.toFixed(1)},${s.y.toFixed(1)}) rotate(${s.rot.toFixed(1)})` });
-  el('rect', { x: -6.5, y: -7, width: 13, height: 14, rx: 2.5, fill: ZONES[s.zone].color }, g);
-  el('text', { y: 2.6, transform: `rotate(${(-s.rot).toFixed(1)})` }, g).textContent = s.n;
+  const g = el('g', { class: 'seat', 'data-id': s.id, transform: `translate(${s.x},${s.y}) rotate(${s.rot})` });
+  el('rect', { x: -5, y: -6.2, width: 10, height: 12.4, rx: 1.8, fill: ZONES[s.zone].color }, g);
+  el('text', { y: 2, transform: `rotate(${-s.rot})` }, g).textContent = s.n;
   const title = el('title', {}, g); title.textContent = s.label;
   seatEls.set(s.id, { g, title });
 }
@@ -241,7 +228,7 @@ function renderStats() {
   $('#zones').innerHTML = Object.entries(ZONES).map(([z, info]) =>
     `<div class="zrow"><i style="background:${info.color}"></i><span>${info.name}</span><b>${per[z].total - per[z].taken}</b><small>/ ${per[z].total}</small></div>`).join('');
   const bySeller = {};
-  for (const id in sold) { const b = sold[id].by || '?'; bySeller[b] = (bySeller[b] || 0) + 1; }
+  for (const id in sold) { if (!SEAT_BY_ID.has(id)) continue; const b = sold[id].by || '?'; bySeller[b] = (bySeller[b] || 0) + 1; }
   $('#sellers').innerHTML = Object.entries(bySeller).sort((a, b) => b[1] - a[1])
     .map(([n, c]) => `<div class="zrow"><span>${esc(n)}${n === me ? ' (Ty)' : ''}</span><b>${c}</b></div>`).join('') || '<small>Jeszcze nic nie sprzedano</small>';
 }

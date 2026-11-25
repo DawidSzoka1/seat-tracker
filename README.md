@@ -55,16 +55,20 @@ Dopóki w `config.js` jest `null`, strona działa w **trybie demo** (dane tylko 
 synchronizacja między kartami). Lokalnie: `python3 -m http.server` w tym folderze i wejdź na
 <http://localhost:8000>. Uwaga: plików nie da się otworzyć podwójnym kliknięciem (moduły JS wymagają serwera).
 
-## Poprawianie układu sali
-Liczby miejsc w rzędach zostały **odczytane z grafiki planu** – przed sprzedażą porównaj je z oficjalnym
-planem. Wszystko jest w `layout.js`, np.:
+## Układ sali
+Sala ma **756 miejsc**. Pozycje, numeracja i strefy wszystkich miejsc są w `seats.js` –
+plik został wygenerowany 1:1 z oficjalnego planu widowni (obrazek „Duża Scena – plan widowni”)
+skryptem `tools/build_layout.py`, który wykrywa miejsca na obrazku i sprawdza liczbę miejsc
+w każdym rzędzie/loży z planem.
 
-```js
-[5, '1-26', 2],            // rząd 5: miejsca 1–26, Strefa II
-[14, '1-7,_6,8-15', 3],    // rząd 14: 1–7, przerwa na konsoletę (6 pozycji), 8–15
+Nazwy sekcji, napisy na planie i kolory stref są w `layout.js`.
+
+Ponowne wygenerowanie (np. po zmianie planu):
+
 ```
-
-Zmiana strefy (ceny) = zmiana ostatniej liczby (1–4).
+pip install pillow numpy
+python3 tools/build_layout.py plan-widowni.jpg seats.js
+```
 
 ## Awaryjnie
 - Ręczne poprawki / wyczyszczenie sali: konsola Firebase → Realtime Database → `events/<klucz>`.
